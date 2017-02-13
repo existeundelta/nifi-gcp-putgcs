@@ -1,9 +1,11 @@
 package com.synack.nifi.gcp.putgcs;
 
+import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -19,6 +21,7 @@ import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
@@ -39,12 +42,18 @@ import org.apache.nifi.processor.util.StandardValidators;
 @WritesAttributes({})
 public class PutGcs extends AbstractProcessor {
 
+    public static final PropertyDescriptor authProperty = new PropertyDescriptor.Builder().name("Authentication Keys")
+            .description("Required if outside of GCP. OAuth token (contents of myproject.json)")
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .sensitive(true)
+            .build();
+
     public static final PropertyDescriptor bucketNameProperty = new PropertyDescriptor.Builder().name("Bucket name")
             .description("Destination Bucket")
             .required(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
-    
+
     public static final PropertyDescriptor filenameProperty = new PropertyDescriptor.Builder().name("filename")
             .description("Destination base path")
             .defaultValue("${now()}")
@@ -87,35 +96,44 @@ public class PutGcs extends AbstractProcessor {
 
     @OnScheduled
     public void onScheduled(final ProcessContext context) {
+        if (storage == null) {
+            StorageOptions.Builder opts = StorageOptions.getDefaultInstance().toBuilder();
 
+            PropertyValue authKeys = context.getProperty(authProperty);
+            if (authKeys.isSet()) {
+                try {
+                    opts = opts.setCredentials(ServiceAccountCredentials.fromStream(new ByteArrayInputStream(authKeys.getValue().getBytes())));
+                } catch (Exception e) {
+                    throw new ProcessException("Unable to set storage credentials", e);
+                }
+            }
+
+            storage = opts.build().getService();
+        }
     }
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        FlowFile flow = session.get();
-
-        if (flow == null) {
+        if (session.getQueueSize().getObjectCount() == 0) {
             return;
         }
+        
+        FlowFile flow = session.get();
 
         String bucketName = context.getProperty(bucketNameProperty).getValue();
         String filename = context.getProperty(filenameProperty).evaluateAttributeExpressions(flow).getValue();
 
-        if (storage == null) {
-            storage = StorageOptions.getDefaultInstance().getService();
-        }
-
         BlobInfo blobInfo = BlobInfo.newBuilder(bucketName, filename).build();
-        
+
         getLogger().info("Writting " + filename + " to " + bucketName);
 
         try {
             InputStream in = session.read(flow);
-            
+
             try (WriteChannel writer = storage.writer(blobInfo)) {
-                byte[] buffer = new byte[1024];
+                byte[] buffer = new byte[8 * 1024];
                 int limit;
-                
+
                 while ((limit = in.read(buffer)) >= 0) {
                     writer.write(ByteBuffer.wrap(buffer, 0, limit));
                 }
@@ -123,7 +141,7 @@ public class PutGcs extends AbstractProcessor {
         } catch (Exception e) {
             throw new ProcessException("error uploading", e);
         }
-        
+
         session.remove(flow);
         session.commit();
     }
