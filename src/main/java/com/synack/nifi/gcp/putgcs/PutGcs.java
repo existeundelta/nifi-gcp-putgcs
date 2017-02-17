@@ -13,7 +13,6 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
@@ -55,32 +54,33 @@ public class PutGcs extends AbstractProcessor {
             .build();
 
     public static final PropertyDescriptor filenameProperty = new PropertyDescriptor.Builder().name("filename")
-            .description("Destination base path")
-            .defaultValue("${now()}")
+            .description("Destination file name")
+            .defaultValue("${now():toNumber()}")
             .dynamic(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
-    static final Relationship REL_SUCCESS = new Relationship.Builder()
-            .name("success")
-            .description("FlowFiles received from Pubsub.")
+    static final Relationship REL_FAILURE = new Relationship.Builder()
+            .name("failure")
+            .description("FlowFiles that failed to upload.")
             .build();
 
     private List<PropertyDescriptor> descriptors;
-
     private Set<Relationship> relationships;
 
+    // client state
     private Storage storage;
 
     @Override
     protected void init(final ProcessorInitializationContext context) {
         final List<PropertyDescriptor> descriptors = new ArrayList<PropertyDescriptor>();
+        descriptors.add(authProperty);
         descriptors.add(bucketNameProperty);
         descriptors.add(filenameProperty);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<Relationship>();
-        //relationships.add(REL_SUCCESS);
+        relationships.add(REL_FAILURE);
         this.relationships = Collections.unmodifiableSet(relationships);
     }
 
@@ -109,40 +109,55 @@ public class PutGcs extends AbstractProcessor {
             }
 
             storage = opts.build().getService();
+
+            if (storage == null) {
+                throw new ProcessException("Unable to create storage");
+            }
         }
     }
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        if (session.getQueueSize().getObjectCount() == 0) {
-            return;
-        }
-        
         FlowFile flow = session.get();
 
         String bucketName = context.getProperty(bucketNameProperty).getValue();
         String filename = context.getProperty(filenameProperty).evaluateAttributeExpressions(flow).getValue();
 
-        BlobInfo blobInfo = BlobInfo.newBuilder(bucketName, filename).build();
-
-        getLogger().info("Writting " + filename + " to " + bucketName);
+        getLogger().info("Uploading " + filename + " to " + bucketName);
 
         try {
-            InputStream in = session.read(flow);
+            BlobInfo blobInfo;
+            
+            if(flow.getSize() < 1024 * 1024) {
+                blobInfo
+                        = storage.create(
+                                BlobInfo.newBuilder(bucketName, filename).build(),
+                                session.read(flow));
+            } else {
+                // It's recommended that larger uploads are done this way.
+                blobInfo = BlobInfo.newBuilder(bucketName, filename).build();
+            
+                InputStream in = session.read(flow);
 
-            try (WriteChannel writer = storage.writer(blobInfo)) {
-                byte[] buffer = new byte[8 * 1024];
-                int limit;
+                try (WriteChannel writer = storage.writer(blobInfo)) {
+                    byte[] buffer = new byte[8 * 1024];
+                    int limit;
 
-                while ((limit = in.read(buffer)) >= 0) {
-                    writer.write(ByteBuffer.wrap(buffer, 0, limit));
+                    while ((limit = in.read(buffer)) >= 0) {
+                        writer.write(ByteBuffer.wrap(buffer, 0, limit));
+                    }
                 }
             }
+
+            session.remove(flow);
+            
+            getLogger().info("Done Uploading " + filename + ": " + blobInfo);
         } catch (Exception e) {
-            throw new ProcessException("error uploading", e);
+            session.transfer(flow, REL_FAILURE);
+            
+            getLogger().error("Error uploading: " + e.toString());
         }
 
-        session.remove(flow);
         session.commit();
     }
 }
