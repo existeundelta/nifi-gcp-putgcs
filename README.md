@@ -4,4 +4,4 @@ This is an [Apache NIFI](https://nifi.apache.org/) processor that uploads files 
 
 ## Installation
 * mvn pakage
-* cp ./target/*.nar $NIFI_HOME/libs
+* cp ./target/*.nar $NIFI_HOME/lib
