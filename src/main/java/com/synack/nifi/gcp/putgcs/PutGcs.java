@@ -50,6 +50,7 @@ public class PutGcs extends AbstractProcessor {
     public static final PropertyDescriptor bucketNameProperty = new PropertyDescriptor.Builder().name("Bucket name")
             .description("Destination Bucket")
             .required(true)
+            .dynamic(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
@@ -120,7 +121,7 @@ public class PutGcs extends AbstractProcessor {
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
         FlowFile flow = session.get();
 
-        String bucketName = context.getProperty(bucketNameProperty).getValue();
+        String bucketName = context.getProperty(bucketNameProperty).evaluateAttributeExpressions(flow).getValue();
         String filename = context.getProperty(filenameProperty).evaluateAttributeExpressions(flow).getValue();
 
         getLogger().info("Uploading " + filename + " to " + bucketName);
